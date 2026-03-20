@@ -5,6 +5,8 @@ import json
 import numpy as np
 import tensorflow as tf
 from collections import Counter
+from pathlib import Path
+from loguru import logger
 
 
 SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
@@ -46,7 +48,11 @@ class Vocab:
 
     def encode(self, formula, max_len):
         toks = tokenize_latex(formula)
-        ids = [self.bos_id] + [self.token_to_id.get(t, self.unk_id) for t in toks] + [self.eos_id]
+        ids = (
+            [self.bos_id]
+            + [self.token_to_id.get(t, self.unk_id) for t in toks]
+            + [self.eos_id]
+        )
         ids = ids[:max_len]
         if len(ids) < max_len:
             ids += [self.pad_id] * (max_len - len(ids))
@@ -75,9 +81,28 @@ class Vocab:
             return cls(json.load(f))
 
 
+def read_text_auto(path):
+    path = Path(path)
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+    last_error = None
+
+    for enc in encodings:
+        try:
+            text = path.read_text(encoding=enc)
+            logger.info(f"Read {path} with encoding={enc}")
+            return text, enc
+        except UnicodeDecodeError as e:
+            last_error = e
+            logger.warning(f"Failed reading {path} with encoding={enc}: {e}")
+
+    raise last_error
+
+
 def load_formulas(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return [line.rstrip("\n") for line in f]
+    text, enc = read_text_auto(path)
+    lines = text.splitlines()
+    logger.info(f"Loaded {len(lines)} formulas from {path} using encoding={enc}")
+    return [line.rstrip("\n") for line in lines]
 
 
 def load_split(lst_path, formulas, image_dir):
@@ -87,11 +112,13 @@ def load_split(lst_path, formulas, image_dir):
             formula_idx, image_name, render_type = line.strip().split()
             formula = formulas[int(formula_idx)]
             image_path = os.path.join(image_dir, image_name + ".png")
-            samples.append({
-                "image_path": image_path,
-                "formula": formula,
-                "render_type": render_type,
-            })
+            samples.append(
+                {
+                    "image_path": image_path,
+                    "formula": formula,
+                    "render_type": render_type,
+                }
+            )
     return samples
 
 
@@ -125,13 +152,23 @@ def preprocess_image(path, target_height=128, max_width=512):
 
 def generator(samples, vocab, max_len, target_height, max_width):
     for s in samples:
-        img = preprocess_image(s["image_path"], target_height=target_height, max_width=max_width)
+        img = preprocess_image(
+            s["image_path"], target_height=target_height, max_width=max_width
+        )
         tgt_in, tgt_out = vocab.encode(s["formula"], max_len=max_len)
         yield img, tgt_in, tgt_out
 
 
-def make_dataset(samples, vocab, batch_size, max_len, target_height=128, max_width=512,
-                 shuffle=False, buffer_size=2048):
+def make_dataset(
+    samples,
+    vocab,
+    batch_size,
+    max_len,
+    target_height=128,
+    max_width=512,
+    shuffle=False,
+    buffer_size=2048,
+):
     output_signature = (
         tf.TensorSpec(shape=(target_height, None, 1), dtype=tf.float32),
         tf.TensorSpec(shape=(max_len - 1,), dtype=tf.int32),
