@@ -1,4 +1,5 @@
 import os
+
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import keras
@@ -10,30 +11,38 @@ class CNNEncoder(layers.Layer):
     def __init__(self, d_model=256, dropout=0.1, name="cnn_encoder", **kwargs):
         super().__init__(name=name, **kwargs)
         self.conv_blocks = [
-            keras.Sequential([
-                layers.Conv2D(64, 3, padding="same", activation="relu"),
-                layers.BatchNormalization(),
-                layers.MaxPooling2D(pool_size=(2, 2)),
-            ]),
-            keras.Sequential([
-                layers.Conv2D(128, 3, padding="same", activation="relu"),
-                layers.BatchNormalization(),
-                layers.MaxPooling2D(pool_size=(2, 2)),
-            ]),
-            keras.Sequential([
-                layers.Conv2D(256, 3, padding="same", activation="relu"),
-                layers.BatchNormalization(),
-                layers.Conv2D(256, 3, padding="same", activation="relu"),
-                layers.BatchNormalization(),
-                layers.MaxPooling2D(pool_size=(2, 1)),
-            ]),
-            keras.Sequential([
-                layers.Conv2D(256, 3, padding="same", activation="relu"),
-                layers.BatchNormalization(),
-                layers.Conv2D(d_model, 3, padding="same", activation="relu"),
-                layers.BatchNormalization(),
-                layers.MaxPooling2D(pool_size=(1, 2)),
-            ]),
+            keras.Sequential(
+                [
+                    layers.Conv2D(64, 3, padding="same", activation="relu"),
+                    layers.BatchNormalization(),
+                    layers.MaxPooling2D(pool_size=(2, 2)),
+                ]
+            ),
+            keras.Sequential(
+                [
+                    layers.Conv2D(128, 3, padding="same", activation="relu"),
+                    layers.BatchNormalization(),
+                    layers.MaxPooling2D(pool_size=(2, 2)),
+                ]
+            ),
+            keras.Sequential(
+                [
+                    layers.Conv2D(256, 3, padding="same", activation="relu"),
+                    layers.BatchNormalization(),
+                    layers.Conv2D(256, 3, padding="same", activation="relu"),
+                    layers.BatchNormalization(),
+                    layers.MaxPooling2D(pool_size=(2, 1)),
+                ]
+            ),
+            keras.Sequential(
+                [
+                    layers.Conv2D(256, 3, padding="same", activation="relu"),
+                    layers.BatchNormalization(),
+                    layers.Conv2D(d_model, 3, padding="same", activation="relu"),
+                    layers.BatchNormalization(),
+                    layers.MaxPooling2D(pool_size=(1, 2)),
+                ]
+            ),
         ]
         self.dropout = layers.Dropout(dropout)
 
@@ -107,7 +116,15 @@ class TokenEmbedding(layers.Layer):
 
 
 class AttentionDecoder(layers.Layer):
-    def __init__(self, vocab_size, emb_dim=128, dec_dim=256, attn_dim=256, name="decoder", **kwargs):
+    def __init__(
+        self,
+        vocab_size,
+        emb_dim=128,
+        dec_dim=256,
+        attn_dim=256,
+        name="decoder",
+        **kwargs
+    ):
         super().__init__(name=name, **kwargs)
         self.embedding = TokenEmbedding(vocab_size, emb_dim)
         self.gru = layers.GRU(dec_dim, return_state=True, return_sequences=False)
@@ -115,7 +132,9 @@ class AttentionDecoder(layers.Layer):
         self.fc1 = layers.Dense(dec_dim, activation="tanh")
         self.fc2 = layers.Dense(vocab_size)
 
-    def call_step(self, prev_token, prev_hidden, enc_features, image_mask=None, training=False):
+    def call_step(
+        self, prev_token, prev_hidden, enc_features, image_mask=None, training=False
+    ):
         token_emb = self.embedding(prev_token)  # [B, 1, E]
         context, alpha = self.attn(enc_features, prev_hidden, mask=image_mask)
         gru_in = tf.concat([token_emb[:, 0, :], context], axis=-1)
@@ -129,7 +148,17 @@ class AttentionDecoder(layers.Layer):
 
 
 class Im2LatexModel(keras.Model):
-    def __init__(self, vocab_size, d_model=256, emb_dim=128, dec_dim=256, attn_dim=256, bos_id=1, eos_id=2, pad_id=0):
+    def __init__(
+        self,
+        vocab_size,
+        d_model=256,
+        emb_dim=128,
+        dec_dim=256,
+        attn_dim=256,
+        bos_id=1,
+        eos_id=2,
+        pad_id=0,
+    ):
         super().__init__()
         self.encoder_cnn = CNNEncoder(d_model=d_model)
         self.row_encoder = RowEncoder(d_model=d_model)
@@ -150,12 +179,24 @@ class Im2LatexModel(keras.Model):
         x = self.row_encoder(x, training=training)
         return x
 
-    def make_image_mask(self, images):
-        # images expected normalized grayscale, white background near 1.0
-        nonwhite = tf.cast(images < 0.99, tf.float32)
-        pooled = tf.nn.max_pool2d(nonwhite, ksize=16, strides=16, padding="SAME")
-        pooled = tf.squeeze(pooled, axis=-1)
-        return tf.cast(pooled > 0, tf.float32)
+    def call(self, inputs, training=False):
+        images, tgt_in = inputs
+        enc = self.encode(images, training=training)
+        hidden = self.decoder.init_hidden(tf.shape(images)[0], self.dec_dim)
+
+        seq_len = tgt_in.shape[1]
+        if seq_len is None:
+            raise ValueError("tgt_in.shape[1] must be static for this implementation")
+
+        logits_all = []
+        for t in range(seq_len):
+            prev_tok = tgt_in[:, t : t + 1]
+            logits, hidden, _ = self.decoder.call_step(
+                prev_tok, hidden, enc, image_mask=None, training=training
+            )
+            logits_all.append(logits)
+
+        return tf.stack(logits_all, axis=1)  # [B, T, V]
 
     def train_step(self, data):
         images, tgt_in, tgt_out = data
@@ -168,9 +209,12 @@ class Im2LatexModel(keras.Model):
             total_tokens = 0.0
             preds = []
 
-            seq_len = tf.shape(tgt_in)[1]
-            for t in tf.range(seq_len):
-                prev_tok = tgt_in[:, t:t+1]
+            seq_len = tgt_in.shape[1]
+            if seq_len is None:
+                seq_len = int(tf.shape(tgt_in)[1])
+
+            for t in range(seq_len):
+                prev_tok = tgt_in[:, t : t + 1]
                 logits, hidden, _ = self.decoder.call_step(
                     prev_tok, hidden, enc, image_mask=image_mask, training=True
                 )
@@ -208,9 +252,12 @@ class Im2LatexModel(keras.Model):
         total_tokens = 0.0
         preds = []
 
-        seq_len = tf.shape(tgt_in)[1]
-        for t in tf.range(seq_len):
-            prev_tok = tgt_in[:, t:t+1]
+        seq_len = tgt_in.shape[1]
+        if seq_len is None:
+            seq_len = int(tf.shape(tgt_in)[1])
+
+        for t in range(seq_len):
+            prev_tok = tgt_in[:, t : t + 1]
             logits, hidden, _ = self.decoder.call_step(
                 prev_tok, hidden, enc, image_mask=image_mask, training=False
             )
