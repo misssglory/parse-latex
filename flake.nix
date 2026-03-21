@@ -37,6 +37,11 @@
             git
             rocm-cmake
 	    yaml-cpp
+  python312Packages.pyyaml
+  python312Packages.joblib
+  python312Packages.numpy
+  python312Packages.msgpack
+  python312Packages.python-dateutil
           ];
 
           buildInputs = with pkgs; [
@@ -66,6 +71,12 @@
 	    # nanobind
 	    python312
 	    python312Packages.nanobind
+  python312Packages.pyyaml
+  python312Packages.joblib
+  python312Packages.numpy
+  python312Packages.msgpack
+  python312Packages.python-dateutil
+	    tree
           ];
 
           # ВАЖНО: CMAKE_MODULE_PATH должен указывать на реальный путь из rocm-cmake.
@@ -90,7 +101,8 @@
   "-DHIP_PLATFORM=amd"
   "-DHIP_COMPILER=clang"
   # ROCm settings
-  "-DAMDGPU_TARGETS=gfx1100;gfx1101;gfx1102;gfx1103"  # For RDNA3 (8845HS)
+#  "-DAMDGPU_TARGETS=gfx1100;gfx1101;gfx1102;gfx1103"  # For RDNA3 (8845HS)
+    "-DAMDGPU_TARGETS=gfx1103"  # Only your GPU
           ];
 
           # На первом шаге можно попробовать без патчинга FetchContent и посмотреть,
@@ -182,7 +194,28 @@ postPatch = ''
 
 
           buildPhase = ''
-            cd projects/hipsparselt
+	    export CC=${pkgs.rocmPackages.hipcc}/bin/hipcc
+  export CXX=${pkgs.rocmPackages.hipcc}/bin/hipcc
+  export HIPCC=${pkgs.rocmPackages.hipcc}/bin/hipcc
+  export HIP_PLATFORM=amd
+  export HIP_COMPILER=clang
+
+    # Ensure Python can find required modules
+  export PYTHONPATH="${pkgs.python312Packages.pyyaml}/lib/python3.12/site-packages:${pkgs.python312Packages.joblib}/lib/python3.12/site-packages:${pkgs.python312Packages.numpy}/lib/python3.12/site-packages:${pkgs.python312Packages.msgpack}/lib/python3.12/site-packages:$PYTHONPATH"
+  
+  # Also set for Tensile scripts
+  export TENSILE_USE_SYSTEM_PYTHON=1
+  
+  echo "=== Python packages check ==="
+  python -c "import yaml; print('yaml OK')"
+  python -c "import joblib; print('joblib OK')"
+  python -c "import numpy; print('numpy OK')"
+  echo "============================"
+
+	    pwd
+	    ls
+	    ls ..
+            cd ../projects/hipsparselt
             mkdir -p build/release
             cd build/release
             cmake ../.. \
@@ -191,6 +224,7 @@ postPatch = ''
           '';
 
           installPhase = ''
+	    tree -L 2 ..
             cd projects/hipsparselt/build/release
             make install
           '';
