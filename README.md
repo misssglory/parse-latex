@@ -25,6 +25,16 @@ rm -r dataset/crop
 rm -r dataset/formula_images
 ```
 
+## Nix environment setup for ROCm (incomplete)
+```
+nix build .#rocm-cmake
+nix build .#libdivide
+nix build .#hipsparselt
+...
+```
+
+
+
 ## Starting input prompt
 ```
 here is paper to implement image to text attention model for latex formulas translation from images. Dataset description:
