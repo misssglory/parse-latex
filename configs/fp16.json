@@ -1,0 +1,23 @@
+{
+  "dataset_dir": "dataset",
+  "output_dir": "outputs_fp16_small",
+  "epochs": 20,
+  "batch_size": 12,
+  "lr": 0.001,
+  "seed": 42,
+  "max_len": 160,
+  "vocab_size": 800,
+  "min_freq": 1,
+  "target_height": 128,
+  "max_width": 512,
+  "scale_factor": 4.0,
+  "d_model": 256,
+  "emb_dim": 128,
+  "dec_dim": 256,
+  "attn_dim": 256,
+  "visualize_every": 5,
+  "precision": "fp16",
+  "run_eagerly": false,
+  "num_visual_samples": 5,
+  "log_file": "train.log"
+}

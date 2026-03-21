@@ -1,5 +1,4 @@
 import os
-import math
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,10 +9,12 @@ def overlay_attention(image, attn_map):
     img = image.squeeze()
     if img.max() <= 1.0:
         img = (img * 255).astype(np.uint8)
+
     attn = cv2.resize(attn_map.astype(np.float32), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_CUBIC)
     attn = attn - attn.min()
     if attn.max() > 0:
         attn = attn / attn.max()
+
     heat = (plt.cm.jet(attn)[..., :3] * 255).astype(np.uint8)
     base = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
     out = cv2.addWeighted(base, 0.65, heat, 0.35, 0)
@@ -34,13 +35,13 @@ def draw_samples(rows, out_path):
         ax0.axis("off")
 
         ax1.imshow(row["attention_image"])
-        title = (
+        ax1.set_title(
             f"GT: {row['gt']}\n"
             f"PRED: {row['pred']}\n"
             f"COMPILES: {row['compiles']}\n"
-            f"DIFF: {row['diff']}"
+            f"DIFF: {row['diff']}",
+            fontsize=10
         )
-        ax1.set_title(title, fontsize=10)
         ax1.axis("off")
 
     plt.tight_layout()
