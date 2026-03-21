@@ -6,20 +6,44 @@ from matplotlib import gridspec
 
 
 def overlay_attention(image, attn_map):
+    """
+    image: [H, W, 1] or [H, W], grayscale, float32 in [0,1] or uint8
+    attn_map: [H_f, W_f], float attention from model
+    """
     img = image.squeeze()
-    if img.max() <= 1.0:
-        img = (img * 255).astype(np.uint8)
 
-    attn = cv2.resize(attn_map.astype(np.float32), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_CUBIC)
-    attn = attn - attn.min()
+    # normalize grayscale to [0,1]
+    if img.dtype != np.float32 and img.dtype != np.float64:
+        img = img.astype(np.float32) / 255.0
+    else:
+        img = np.clip(img, 0.0, 1.0)
+
+    H, W = img.shape[:2]
+
+    # resize attention to image size
+    attn = attn_map.astype(np.float32)
+    attn = cv2.resize(attn, (W, H), interpolation=cv2.INTER_NEAREST)
+
+    # normalize attention to [0,1]
+    attn -= attn.min()
     if attn.max() > 0:
-        attn = attn / attn.max()
+        attn /= attn.max()
 
-    heat = (plt.cm.jet(attn)[..., :3] * 255).astype(np.uint8)
-    base = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    out = cv2.addWeighted(base, 0.65, heat, 0.35, 0)
-    return out
+    # optional: sharpen contrast a bit (gamma)
+    gamma = 1.0
+    attn = np.power(attn, gamma)
 
+    # we want: background ~1, strokes darker where attn is high
+    # combine as: blended = img * (1 - alpha * attn)
+    alpha = 0.7  # 0=no effect, 1=full darkening with attn
+    factor = 1.0 - alpha * attn
+    blended = img * factor
+    blended = np.clip(blended, 0.0, 1.0)
+
+    # convert to RGB uint8 for matplotlib
+    blended_u8 = (blended * 255).astype(np.uint8)
+    blended_rgb = cv2.cvtColor(blended_u8, cv2.COLOR_GRAY2RGB)
+    return blended_rgb    
 
 def draw_samples(rows, out_path):
     n = len(rows)
