@@ -1,50 +1,46 @@
 import os
-
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import keras
 import tensorflow as tf
 from keras import layers
 
-
 class CNNEncoder(layers.Layer):
     def __init__(self, d_model=256, dropout=0.1, name="cnn_encoder", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.conv_blocks = [
-            keras.Sequential(
-                [
-                    layers.Conv2D(64, 3, padding="same", activation="relu"),
-                    layers.BatchNormalization(),
-                    layers.MaxPooling2D(pool_size=(2, 2)),
-                ]
-            ),
-            keras.Sequential(
-                [
-                    layers.Conv2D(128, 3, padding="same", activation="relu"),
-                    layers.BatchNormalization(),
-                    layers.MaxPooling2D(pool_size=(2, 2)),
-                ]
-            ),
-            keras.Sequential(
-                [
-                    layers.Conv2D(256, 3, padding="same", activation="relu"),
-                    layers.BatchNormalization(),
-                    layers.Conv2D(256, 3, padding="same", activation="relu"),
-                    layers.BatchNormalization(),
-                    layers.MaxPooling2D(pool_size=(2, 1)),
-                ]
-            ),
-            keras.Sequential(
-                [
-                    layers.Conv2D(256, 3, padding="same", activation="relu"),
-                    layers.BatchNormalization(),
-                    layers.Conv2D(d_model, 3, padding="same", activation="relu"),
-                    layers.BatchNormalization(),
-                    layers.MaxPooling2D(pool_size=(1, 2)),
-                ]
-            ),
-        ]
+        self.d_model = d_model
         self.dropout = layers.Dropout(dropout)
+        self.conv_blocks = None  # created in build
+
+    def build(self, input_shape):
+        # input_shape: (batch, H, W, C)
+        self.conv_blocks = [
+            keras.Sequential([
+                layers.Conv2D(64, 3, padding="same", activation="relu"),
+                layers.BatchNormalization(),
+                layers.MaxPooling2D(pool_size=(2, 2)),
+            ], name="conv_block_1"),
+            keras.Sequential([
+                layers.Conv2D(128, 3, padding="same", activation="relu"),
+                layers.BatchNormalization(),
+                layers.MaxPooling2D(pool_size=(2, 2)),
+            ], name="conv_block_2"),
+            keras.Sequential([
+                layers.Conv2D(256, 3, padding="same", activation="relu"),
+                layers.BatchNormalization(),
+                layers.Conv2D(256, 3, padding="same", activation="relu"),
+                layers.BatchNormalization(),
+                layers.MaxPooling2D(pool_size=(2, 1)),
+            ], name="conv_block_3"),
+            keras.Sequential([
+                layers.Conv2D(256, 3, padding="same", activation="relu"),
+                layers.BatchNormalization(),
+                layers.Conv2D(self.d_model, 3, padding="same", activation="relu"),
+                layers.BatchNormalization(),
+                layers.MaxPooling2D(pool_size=(1, 2)),
+            ], name="conv_block_4"),
+        ]
+        super().build(input_shape)
 
     def call(self, images, training=False):
         x = images
@@ -57,11 +53,18 @@ class CNNEncoder(layers.Layer):
 class RowEncoder(layers.Layer):
     def __init__(self, d_model=256, name="row_encoder", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.proj = layers.Dense(d_model)
+        self.d_model = d_model
+        self.proj = None
+        self.row_rnn = None
+
+    def build(self, input_shape):
+        # input_shape: (batch, H, W, C)
+        self.proj = layers.Dense(self.d_model)
         self.row_rnn = layers.Bidirectional(
-            layers.GRU(d_model // 2, return_sequences=True),
+            layers.GRU(self.d_model // 2, return_sequences=True),
             merge_mode="concat",
         )
+        super().build(input_shape)
 
     def call(self, feat_map, training=False):
         x = self.proj(feat_map)
@@ -80,9 +83,17 @@ class RowEncoder(layers.Layer):
 class BahdanauAttention(layers.Layer):
     def __init__(self, attn_dim, name="bahdanau_attention", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.W1 = layers.Dense(attn_dim)
-        self.W2 = layers.Dense(attn_dim)
+        self.attn_dim = attn_dim
+        self.W1 = None
+        self.W2 = None
+        self.V = None
+
+    def build(self, input_shape):
+        # input_shape: (features_shape, hidden_shape)
+        self.W1 = layers.Dense(self.attn_dim)
+        self.W2 = layers.Dense(self.attn_dim)
         self.V = layers.Dense(1)
+        super().build(input_shape)
 
     def call(self, features, hidden, mask=None):
         hidden_exp = tf.expand_dims(tf.expand_dims(hidden, 1), 1)
@@ -103,32 +114,42 @@ class BahdanauAttention(layers.Layer):
 class TokenEmbedding(layers.Layer):
     def __init__(self, vocab_size, emb_dim, name="token_embedding", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.embed = layers.Embedding(vocab_size, emb_dim, mask_zero=True)
+        self.vocab_size = vocab_size
+        self.emb_dim = emb_dim
+        self.embed = None
+
+    def build(self, input_shape):
+        self.embed = layers.Embedding(self.vocab_size, self.emb_dim, mask_zero=True)
+        super().build(input_shape)
 
     def call(self, x):
         return self.embed(x)
 
 
 class AttentionDecoder(layers.Layer):
-    def __init__(
-        self,
-        vocab_size,
-        emb_dim=128,
-        dec_dim=256,
-        attn_dim=256,
-        name="decoder",
-        **kwargs
-    ):
+    def __init__(self, vocab_size, emb_dim=128, dec_dim=256, attn_dim=256, name="decoder", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.embedding = TokenEmbedding(vocab_size, emb_dim)
-        self.gru = layers.GRU(dec_dim, return_state=True, return_sequences=False)
-        self.attn = BahdanauAttention(attn_dim)
-        self.fc1 = layers.Dense(dec_dim, activation="tanh")
-        self.fc2 = layers.Dense(vocab_size, dtype="float32")
+        self.vocab_size = vocab_size
+        self.emb_dim = emb_dim
+        self.dec_dim = dec_dim
+        self.attn_dim = attn_dim
 
-    def call_step(
-        self, prev_token, prev_hidden, enc_features, image_mask=None, training=False
-    ):
+        self.embedding = None
+        self.gru = None
+        self.attn = None
+        self.fc1 = None
+        self.fc2 = None
+
+    def build(self, input_shape):
+        # input_shape not strictly used; we rely on dims passed in __init__
+        self.embedding = TokenEmbedding(self.vocab_size, self.emb_dim)
+        self.gru = layers.GRU(self.dec_dim, return_state=True, return_sequences=False)
+        self.attn = BahdanauAttention(self.attn_dim)
+        self.fc1 = layers.Dense(self.dec_dim, activation="tanh")
+        self.fc2 = layers.Dense(self.vocab_size, dtype="float32")
+        super().build(input_shape)
+
+    def call_step(self, prev_token, prev_hidden, enc_features, image_mask=None, training=False):
         token_emb = self.embedding(prev_token)
         context, alpha = self.attn(enc_features, prev_hidden, mask=image_mask)
         gru_in = tf.concat([token_emb[:, 0, :], context], axis=-1)
@@ -142,18 +163,8 @@ class AttentionDecoder(layers.Layer):
 
 
 class Im2LatexModel(keras.Model):
-    def __init__(
-        self,
-        vocab_size,
-        d_model=256,
-        emb_dim=128,
-        dec_dim=256,
-        attn_dim=256,
-        bos_id=1,
-        eos_id=2,
-        pad_id=0,
-        **kwargs
-    ):
+    def __init__(self, vocab_size, d_model=256, emb_dim=128, dec_dim=256, attn_dim=256,
+                 bos_id=1, eos_id=2, pad_id=0, **kwargs):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.dec_dim = dec_dim
@@ -193,7 +204,7 @@ class Im2LatexModel(keras.Model):
 
         logits_all = []
         for t in range(seq_len):
-            prev_tok = tgt_in[:, t : t + 1]
+            prev_tok = tgt_in[:, t:t+1]
             logits, hidden, _ = self.decoder.call_step(
                 prev_tok, hidden, enc, image_mask=None, training=training
             )

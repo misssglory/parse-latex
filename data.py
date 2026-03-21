@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import tensorflow as tf
 from loguru import logger
-
+from tqdm import tqdm
 
 SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
 
@@ -143,8 +143,8 @@ def preprocess_image(path, target_height=128, max_width=512, scale_factor=1.0):
         raise ValueError("scale_factor must be > 0")
 
     if scale_factor != 1.0:
-        new_h = max(1, int(round(img.shape[0] / scale_factor)))
-        new_w = max(1, int(round(img.shape[1] / scale_factor)))
+        new_h = max(1, int(round(img.shape[0] * scale_factor)))
+        new_w = max(1, int(round(img.shape[1] * scale_factor)))
         img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     h, w = img.shape
@@ -172,33 +172,32 @@ def generator(samples, vocab, max_len, target_height, max_width, scale_factor):
 
 def make_dataset(samples, vocab, batch_size, max_len, target_height=128, max_width=512,
                  scale_factor=1.0, shuffle=False, buffer_size=2048):
-    output_signature = (
-        tf.TensorSpec(shape=(target_height, None, 1), dtype=tf.float32),
-        tf.TensorSpec(shape=(max_len - 1,), dtype=tf.int32),
-        tf.TensorSpec(shape=(max_len - 1,), dtype=tf.int32),
-    )
+    # Precompute all (img, tgt_in, tgt_out) with tqdm
+    imgs = []
+    tins = []
+    touts = []
 
-    ds = tf.data.Dataset.from_generator(
-        lambda: generator(samples, vocab, max_len, target_height, max_width, scale_factor),
-        output_signature=output_signature,
-    )
+    for s in tqdm(samples, desc="Preprocessing", leave=True):
+        img = preprocess_image(
+            s["image_path"],
+            target_height=target_height,
+            max_width=max_width,
+            scale_factor=scale_factor,
+        )
+        tgt_in, tgt_out = vocab.encode(s["formula"], max_len=max_len)
+        imgs.append(img)
+        tins.append(tgt_in)
+        touts.append(tgt_out)
+
+    imgs = np.array(imgs, dtype=np.float32)
+    tins = np.array(tins, dtype=np.int32)
+    touts = np.array(touts, dtype=np.int32)
+
+    ds = tf.data.Dataset.from_tensor_slices((imgs, tins, touts))
 
     if shuffle:
         ds = ds.shuffle(buffer_size)
 
-    ds = ds.padded_batch(
-        batch_size,
-        padded_shapes=(
-            [target_height, None, 1],
-            [max_len - 1],
-            [max_len - 1],
-        ),
-        padding_values=(
-            tf.constant(1.0, dtype=tf.float32),
-            tf.constant(vocab.pad_id, dtype=tf.int32),
-            tf.constant(vocab.pad_id, dtype=tf.int32),
-        ),
-    )
-
+    ds = ds.batch(batch_size, drop_remainder=False)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds

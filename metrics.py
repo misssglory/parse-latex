@@ -29,16 +29,13 @@ def compile_latex_formula(formula: str, workdir=None):
         workdir = tempfile.mkdtemp(prefix="im2latex_")
         own_dir = True
 
-    tex = (
-        r"""
+    tex = r"""
 \documentclass[preview]{standalone}
 \usepackage{amsmath,amssymb,amsfonts}
 \begin{document}
 $%s$
 \end{document}
-"""
-        % formula
-    )
+""" % formula
 
     tex_path = os.path.join(workdir, "sample.tex")
     with open(tex_path, "w", encoding="utf-8") as f:

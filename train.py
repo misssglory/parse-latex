@@ -10,11 +10,14 @@ from data import load_formulas, load_split, Vocab, make_dataset, preprocess_imag
 from model import Im2LatexModel
 from metrics import char_diff, compile_latex_formula
 from viz import overlay_attention, draw_samples
+from history_utils import load_history, save_history, append_epoch, plot_history
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--resume-from", type=str, default=None,
+                        help="Path to previous output_dir to resume from")
 
     parser.add_argument("--dataset-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
@@ -48,8 +51,14 @@ def parse_args():
     if args.config:
         cfg = TrainConfig.load_json(args.config)
 
+    if args.resume_from:
+        resume_dir = args.resume_from
+        resolved_path = os.path.join(resume_dir, "resolved_config.json")
+        cfg = TrainConfig.load_json(resolved_path)
+        cfg.output_dir = resume_dir
+
     for key, value in vars(args).items():
-        if key == "config":
+        if key in ("config", "resume_from"):
             continue
         if key == "run_eagerly":
             if value:
@@ -58,10 +67,10 @@ def parse_args():
         if value is not None:
             setattr(cfg, key.replace("-", "_"), value)
 
-    return cfg
+    return cfg, args.resume_from
 
 
-def build_datasets(cfg):
+def build_splits(cfg):
     formulas = load_formulas(os.path.join(cfg.dataset_dir, "im2latex_formulas.lst"))
     train_samples = load_split(
         os.path.join(cfg.dataset_dir, "im2latex_train.lst"),
@@ -78,13 +87,10 @@ def build_datasets(cfg):
         formulas,
         os.path.join(cfg.dataset_dir, "formatted"),
     )
+    return train_samples, val_samples, test_samples
 
-    train_formulas = [s["formula"] for s in train_samples]
-    vocab = Vocab.build(train_formulas, min_freq=cfg.min_freq, max_size=cfg.vocab_size)
 
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    vocab.save(os.path.join(cfg.output_dir, "vocab.json"))
-
+def make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples):
     train_ds = make_dataset(
         train_samples, vocab,
         batch_size=cfg.batch_size,
@@ -112,7 +118,81 @@ def build_datasets(cfg):
         scale_factor=cfg.scale_factor,
         shuffle=False,
     )
-    return vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds
+    return train_ds, val_ds, test_ds
+
+
+def prepare_new_training(cfg):
+    train_samples, val_samples, test_samples = build_splits(cfg)
+
+    train_formulas = [s["formula"] for s in train_samples]
+    vocab = Vocab.build(train_formulas, min_freq=cfg.min_freq, max_size=cfg.vocab_size)
+
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    vocab.save(os.path.join(cfg.output_dir, "vocab.json"))
+    cfg.save_json(os.path.join(cfg.output_dir, "resolved_config.json"))
+
+    train_ds, val_ds, test_ds = make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples)
+
+    model = Im2LatexModel(
+        vocab_size=len(vocab.token_to_id),
+        d_model=cfg.d_model,
+        emb_dim=cfg.emb_dim,
+        dec_dim=cfg.dec_dim,
+        attn_dim=cfg.attn_dim,
+        bos_id=vocab.bos_id,
+        eos_id=vocab.eos_id,
+        pad_id=vocab.pad_id,
+        name="im2_latex_model",
+    )
+
+    dummy_images = tf.zeros([1, cfg.target_height, 128, 1], dtype=tf.float32)
+    dummy_tgt = tf.zeros([1, cfg.max_len - 1], dtype=tf.int32)
+    _ = model((dummy_images, dummy_tgt), training=False)
+
+    optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.lr)
+    model.compile(optimizer=optimizer, run_eagerly=cfg.run_eagerly)
+
+    history_path = os.path.join(cfg.output_dir, cfg.history_file)
+    history = load_history(history_path)
+
+    return model, vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds, history
+
+
+def prepare_resume(cfg):
+    train_samples, val_samples, test_samples = build_splits(cfg)
+
+    vocab = Vocab.load(os.path.join(cfg.output_dir, "vocab.json"))
+
+    train_ds, val_ds, test_ds = make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples)
+
+    model = Im2LatexModel(
+        vocab_size=len(vocab.token_to_id),
+        d_model=cfg.d_model,
+        emb_dim=cfg.emb_dim,
+        dec_dim=cfg.dec_dim,
+        attn_dim=cfg.attn_dim,
+        bos_id=vocab.bos_id,
+        eos_id=vocab.eos_id,
+        pad_id=vocab.pad_id,
+        name="im2_latex_model",
+    )
+
+    dummy_images = tf.zeros([1, cfg.target_height, 128, 1], dtype=tf.float32)
+    dummy_tgt = tf.zeros([1, cfg.max_len - 1], dtype=tf.int32)
+    _ = model((dummy_images, dummy_tgt), training=False)
+
+    optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.lr)
+    model.compile(optimizer=optimizer, run_eagerly=cfg.run_eagerly)
+
+    best_ckpt = os.path.join(cfg.output_dir, "checkpoints", "best.weights.h5")
+    model.load_weights(best_ckpt)
+    logger.info(f"Resuming from checkpoint: {best_ckpt}")
+
+    history_path = os.path.join(cfg.output_dir, cfg.history_file)
+    history = load_history(history_path)
+    logger.info(f"Loaded history with {len(history.get('loss', []))} epochs")
+
+    return model, vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds, history
 
 
 def sample_visualization(model, vocab, samples, cfg, epoch):
@@ -139,9 +219,10 @@ def sample_visualization(model, vocab, samples, cfg, epoch):
         compiles, _ = compile_latex_formula(pred_formula)
         diff = char_diff(gt_formula, pred_formula)
 
+        blended = overlay_attention(img, avg_attn)
+
         rows.append({
-            "input_image": img.squeeze(),
-            "attention_image": overlay_attention(img, avg_attn),
+            "attention_image": blended,
             "gt": gt_formula,
             "pred": pred_formula,
             "diff": diff,
@@ -153,39 +234,17 @@ def sample_visualization(model, vocab, samples, cfg, epoch):
     logger.info(f"saved sample visualization: {out_path}")
 
 
-def train_model(cfg):
-    os.makedirs(cfg.output_dir, exist_ok=True)
+def train_model(cfg, model, vocab,
+                train_samples, val_samples,
+                train_ds, val_ds,
+                history):
     os.makedirs(os.path.join(cfg.output_dir, "samples"), exist_ok=True)
     os.makedirs(os.path.join(cfg.output_dir, "checkpoints"), exist_ok=True)
 
-    setup_logging(os.path.join(cfg.output_dir, cfg.log_file))
-    set_seed(cfg.seed)
-    setup_precision(cfg.precision)
+    best_val = min(history.get("val_loss", []) or [float("inf")])
 
-    cfg.save_json(os.path.join(cfg.output_dir, "resolved_config.json"))
-
-    vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds = build_datasets(cfg)
-
-    model = Im2LatexModel(
-        vocab_size=len(vocab.token_to_id),
-        d_model=cfg.d_model,
-        emb_dim=cfg.emb_dim,
-        dec_dim=cfg.dec_dim,
-        attn_dim=cfg.attn_dim,
-        bos_id=vocab.bos_id,
-        eos_id=vocab.eos_id,
-        pad_id=vocab.pad_id,
-        name="im2_latex_model",
-    )
-
-    dummy_images = tf.zeros([1, cfg.target_height, 128, 1], dtype=tf.float32)
-    dummy_tgt = tf.zeros([1, cfg.max_len - 1], dtype=tf.int32)
-    _ = model((dummy_images, dummy_tgt), training=False)
-
-    optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.lr)
-    model.compile(optimizer=optimizer, run_eagerly=cfg.run_eagerly)
-
-    best_val = float("inf")
+    history_path = os.path.join(cfg.output_dir, cfg.history_file)
+    hist_png = os.path.join(cfg.output_dir, "history.png")
 
     for epoch in range(1, cfg.epochs + 1):
         logger.info(f"epoch {epoch}/{cfg.epochs}")
@@ -197,7 +256,17 @@ def train_model(cfg):
             verbose=1,
         ).history
 
-        val_loss = float(hist["val_loss"][-1])
+        epoch_hist = {
+            "loss": float(hist["loss"][-1]),
+            "val_loss": float(hist["val_loss"][-1]),
+            "token_acc": float(hist["token_acc"][-1]),
+            "val_token_acc": float(hist["val_token_acc"][-1]),
+        }
+        history = append_epoch(history, epoch_hist)
+        save_history(history, history_path)
+        plot_history(history, hist_png)
+
+        val_loss = epoch_hist["val_loss"]
 
         last_path = os.path.join(cfg.output_dir, "checkpoints", "last.weights.h5")
         model.save_weights(last_path)
@@ -211,7 +280,7 @@ def train_model(cfg):
         if epoch % cfg.visualize_every == 0:
             sample_visualization(model, vocab, val_samples, cfg, epoch)
 
-    return model, vocab, test_samples, test_ds
+    return model, history
 
 
 def evaluate_model(model, vocab, test_samples, test_ds, cfg):
@@ -223,6 +292,24 @@ def evaluate_model(model, vocab, test_samples, test_ds, cfg):
 
 
 if __name__ == "__main__":
-    cfg = parse_args()
-    model, vocab, test_samples, test_ds = train_model(cfg)
+    cfg, resume_from = parse_args()
+
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    logger, log_path = setup_logging(cfg.output_dir, base_name="train")
+    logger.info(f"Log file: {log_path}")
+
+    set_seed(cfg.seed)
+    setup_precision(cfg.precision)
+
+    if resume_from:
+        model, vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds, history = \
+            prepare_resume(cfg)
+    else:
+        model, vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds, history = \
+            prepare_new_training(cfg)
+
+    model, history = train_model(cfg, model, vocab,
+                                 train_samples, val_samples,
+                                 train_ds, val_ds, history)
+
     evaluate_model(model, vocab, test_samples, test_ds, cfg)

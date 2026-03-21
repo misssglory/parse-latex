@@ -1,6 +1,7 @@
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
+from datetime import datetime
 
 
 @dataclass
@@ -26,13 +27,16 @@ class TrainConfig:
     dec_dim: int = 256
     attn_dim: int = 256
 
-    visualize_every: int = 5
-    num_visual_samples: int = 5
+    visualize_every: int = 1
+    num_visual_samples: int = 3
 
-    precision: str = "fp32"   # fp32 | fp16
+    precision: str = "fp32"   # "fp32" or "fp16"
     run_eagerly: bool = False
 
     log_file: str = "train.log"
+    history_file: str = "history.json"
+
+    use_bos_eos: bool = True  # currently always True for compatibility
 
     def save_json(self, path: str):
         path = Path(path)
@@ -45,3 +49,7 @@ class TrainConfig:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls(**data)
+
+    @staticmethod
+    def timestamp():
+        return datetime.now().strftime("%Y%m%d_%H%M%S")

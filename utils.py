@@ -1,14 +1,20 @@
+import os
 import random
 import numpy as np
 import tensorflow as tf
 from loguru import logger
+from datetime import datetime
 
 
-def setup_logging(log_path):
+def setup_logging(log_dir, base_name="train"):
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"{base_name}-{ts}.log")
+
     logger.remove()
     logger.add(lambda msg: print(msg, end=""), level="INFO")
     logger.add(log_path, rotation="10 MB", level="DEBUG")
-    return logger
+    return logger, log_path
 
 
 def set_seed(seed: int):
