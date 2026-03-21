@@ -17,7 +17,7 @@
         # Импортируем rocm-cmake из отдельного файла
         rocm-cmake = import ./rocm-cmake.nix { inherit pkgs; };
         libdivide  = import ./libdivide.nix  { inherit pkgs; };
-
+        nanobind = import ./nanobind.nix  { inherit pkgs; };
 
         hipsparselt = pkgs.stdenv.mkDerivation rec {
           pname = "hipsparselt";
@@ -33,9 +33,10 @@
           nativeBuildInputs = with pkgs; [
             cmake
             ninja
-            python3
+            python312
             git
             rocm-cmake
+	    yaml-cpp
           ];
 
           buildInputs = with pkgs; [
@@ -45,12 +46,26 @@
             rocmPackages.rocm-core
             # rocmPackages.hip-common
             rocmPackages.clr
+            rocmPackages.roctracer
+            rocmPackages.amdsmi
+            #rocmPackages.hipfort
             #haskellPackages.hip
-            msgpack-cxx
+	    rocmPackages.llvm.llvm
+	    rocmPackages.llvm.lld
+	    rocmPackages.hipcc
+            #flang
+	    gfortran
+	    msgpack-cxx
             yaml-cpp
             fmt
             spdlog
             libdivide
+	    gtest
+	    blas
+	    cli11
+	    # nanobind
+	    python312
+	    python312Packages.nanobind
           ];
 
           # ВАЖНО: CMAKE_MODULE_PATH должен указывать на реальный путь из rocm-cmake.
@@ -64,38 +79,107 @@
 
  #   "-DCMAKE_PREFIX_PATH=${pkgs.rocmPackages.clr}"
   #  "-DROCROLLER_BUILD_TESTING=OFF"   # avoid extra yaml work[web:145]
- #   "-DROCROLLER_YAML_BACKEND=LLVM"   # prefer LLVM yaml over yaml-cpp[web:121]
+    "-DROCROLLER_YAML_BACKEND=YAML_CPP"   # prefer LLVM yaml over yaml-cpp[web:121]
+    "-DROCROLLER_ENABLE_GEMM_CLIENT_TESTS=OFF"
+    "-DROCROLLER_ENABLE_CATCH=OFF"
+      "-DCMAKE_CXX_COMPILER=${pkgs.rocmPackages.hipcc}/bin/hipcc"
+  "-DCMAKE_C_COMPILER=${pkgs.rocmPackages.hipcc}/bin/hipcc"
+  # HIP settings
+  "-DHIP_PATH=${pkgs.rocmPackages.clr}"
+  "-DHIP_ROOT_DIR=${pkgs.rocmPackages.clr}"
+  "-DHIP_PLATFORM=amd"
+  "-DHIP_COMPILER=clang"
+  # ROCm settings
+  "-DAMDGPU_TARGETS=gfx1100;gfx1101;gfx1102;gfx1103"  # For RDNA3 (8845HS)
           ];
 
           # На первом шаге можно попробовать без патчинга FetchContent и посмотреть,
           # станет ли hipSPARSELt/hipblas-common использовать уже установленный rocm-cmake.
           # При необходимости потом добавим postPatch, чтобы отключить сетевые FetchContent.
 
-postPatch = ''
-  # уже существующие штуки (rocm-cmake, hipblas-common и т.п.) если есть…
 
-  # Отключаем FetchContent для fmt в rocroller
+postPatch = ''
+  # Disable FetchContent for various dependencies
   substituteInPlace shared/rocroller/CMakeLists.txt \
     --replace "FetchContent_MakeAvailable(fmt)" \
-              "# Nix: use system fmt instead of FetchContent_MakeAvailable(fmt)"
-
-  # Отключаем FetchContent для spdlog в rocroller
+              "find_package(fmt CONFIG REQUIRED)"
+  
   substituteInPlace shared/rocroller/CMakeLists.txt \
     --replace "FetchContent_MakeAvailable(spdlog)" \
-              "# Nix: use system spdlog instead of FetchContent_MakeAvailable(spdlog)"
-
-  # Отключаем FetchContent для libdivide в rocroller
+              "find_package(spdlog CONFIG REQUIRED)"
+  
   substituteInPlace shared/rocroller/CMakeLists.txt \
     --replace "FetchContent_MakeAvailable(libdivide)" \
-              "# Nix: use system libdivide instead of FetchContent_MakeAvailable(libdivide)"
+              "find_package(libdivide CONFIG REQUIRED)"
+  
+  substituteInPlace shared/rocroller/CMakeLists.txt \
+    --replace "FetchContent_MakeAvailable(yaml_cpp)" \
+              "find_package(yaml-cpp CONFIG REQUIRED)"
+  
+  substituteInPlace shared/rocroller/CMakeLists.txt \
+    --replace "FetchContent_MakeAvailable(googletest)" \
+              "find_package(GTest CONFIG REQUIRED)"
+  
+  # Fix GPUArchitectureGenerator linking
+  substituteInPlace shared/rocroller/GPUArchitectureGenerator/CMakeLists.txt \
+    --replace "yaml-cpp::yaml-cpp" "yaml-cpp"
+  
+  # Fix nanobind in tensilelite
+  substituteInPlace projects/hipblaslt/tensilelite/rocisa/CMakeLists.txt \
+    --replace "FetchContent_MakeAvailable(nanobind)" \
+              "# Nix: using system nanobind"
+  
+  sed -i '1i\
+  # Find nanobind Python module\
+  execute_process(\
+    COMMAND python -c "import nanobind; print(nanobind.__file__)"\
+    OUTPUT_STRIP_TRAILING_WHITESPACE\
+    OUTPUT_VARIABLE NANOBIND_MODULE_PATH\
+    ERROR_VARIABLE NANOBIND_IMPORT_ERROR\
+    RESULT_VARIABLE NANOBIND_IMPORT_RESULT\
+  )\
+  \
+  message(STATUS "Checking nanobind Python module...")\
+  message(STATUS "  Import result: ''${NANOBIND_IMPORT_RESULT}")\
+  if(NANOBIND_IMPORT_RESULT)\
+    message(STATUS "  Import error: ''${NANOBIND_IMPORT_ERROR}")\
+  endif()\
+  message(STATUS "  nanobind module path: ''${NANOBIND_MODULE_PATH}")\
+  \
+  execute_process(\
+    COMMAND python -m nanobind --cmake_dir\
+    OUTPUT_STRIP_TRAILING_WHITESPACE\
+    OUTPUT_VARIABLE NANOBIND_CMAKE_DIR\
+    ERROR_VARIABLE NANOBIND_ERROR\
+    RESULT_VARIABLE NANOBIND_RESULT\
+  )\
+  \
+  message(STATUS "Finding nanobind CMake dir...")\
+  message(STATUS "  Command result: ''${NANOBIND_RESULT}")\
+  if(NANOBIND_RESULT)\
+    message(STATUS "  Error output: ''${NANOBIND_ERROR}")\
+  endif()\
+  message(STATUS "  nanobind CMake dir: ''${NANOBIND_CMAKE_DIR}")\
+  \
+  if(EXISTS "''${NANOBIND_CMAKE_DIR}")\
+    message(STATUS "  ✓ Directory exists: ''${NANOBIND_CMAKE_DIR}")\
+  else()\
+    message(WARNING "  ✗ Directory does NOT exist: ''${NANOBIND_CMAKE_DIR}")\
+  endif()\
+  \
+  list(APPEND CMAKE_PREFIX_PATH "''${NANOBIND_CMAKE_DIR}")\
+  message(STATUS "Updated CMAKE_PREFIX_PATH: ''${CMAKE_PREFIX_PATH}")\
+  \
+  find_package(nanobind CONFIG REQUIRED)\
+  if(nanobind_FOUND)\
+    message(STATUS "✓ nanobind found! Version: ''${nanobind_VERSION}")\
+    message(STATUS "  nanobind include dir: ''${nanobind_INCLUDE_DIR}")\
+    message(STATUS "  nanobind lib dir: ''${nanobind_LIB_DIR}")\
+  endif()\
+  ' projects/hipblaslt/tensilelite/rocisa/CMakeLists.txt
 
-  # Если нужно, можно добавить find_package или include_directories,
-  # но rocroller, скорее всего, просто добавляет libdivide как интерфейсный include.
-
-  # Подстрахуемся: явно потребуем system fmt и spdlog через find_package
-  sed -i '1i find_package(fmt CONFIG REQUIRED)' shared/rocroller/CMakeLists.txt
-  sed -i '2i find_package(spdlog CONFIG REQUIRED)' shared/rocroller/CMakeLists.txt
 '';
+
 
           buildPhase = ''
             cd projects/hipsparselt
