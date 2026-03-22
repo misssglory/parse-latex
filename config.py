@@ -37,6 +37,8 @@ class TrainConfig:
     history_file: str = "history.json"
 
     use_bos_eos: bool = True  # currently always True for compatibility
+    cache_preprocessed: bool = False
+    cache_prefix: str = "preprocessed"  # base name for .npz files
 
     def save_json(self, path: str):
         path = Path(path)

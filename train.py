@@ -6,7 +6,11 @@ from loguru import logger
 
 from config import TrainConfig
 from utils import setup_logging, set_seed, setup_precision
-from data import load_formulas, load_split, Vocab, make_dataset, preprocess_image
+from data import (
+    load_formulas, load_split, Vocab,
+    preprocess_image, preprocess_split,
+    cache_paths, make_dataset_from_arrays,
+)
 from model import Im2LatexModel
 from metrics import char_diff, compile_latex_formula
 from viz import overlay_attention, draw_samples
@@ -44,6 +48,8 @@ def parse_args():
 
     parser.add_argument("--precision", type=str, choices=["fp32", "fp16"], default=None)
     parser.add_argument("--run-eagerly", action="store_true")
+    parser.add_argument("--cache-preprocessed", action="store_true",
+                    help="Cache preprocessed splits into output_dir and reuse on resume")
 
     args = parser.parse_args()
 
@@ -91,33 +97,42 @@ def build_splits(cfg):
 
 
 def make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples):
-    train_ds = make_dataset(
-        train_samples, vocab,
-        batch_size=cfg.batch_size,
-        max_len=cfg.max_len,
-        target_height=cfg.target_height,
-        max_width=cfg.max_width,
-        scale_factor=cfg.scale_factor,
-        shuffle=True,
+    caches = cache_paths(cfg.output_dir, prefix=cfg.cache_prefix) if cfg.cache_preprocessed else {
+        "train": None, "val": None, "test": None
+    }
+
+    train_imgs, train_tin, train_tout = preprocess_split(
+        train_samples, vocab, cfg.max_len,
+        cfg.target_height, cfg.max_width, cfg.scale_factor,
+        desc="Preprocessing train",
+        cache_path=caches["train"],
     )
-    val_ds = make_dataset(
-        val_samples, vocab,
-        batch_size=cfg.batch_size,
-        max_len=cfg.max_len,
-        target_height=cfg.target_height,
-        max_width=cfg.max_width,
-        scale_factor=cfg.scale_factor,
-        shuffle=False,
+    val_imgs, val_tin, val_tout = preprocess_split(
+        val_samples, vocab, cfg.max_len,
+        cfg.target_height, cfg.max_width, cfg.scale_factor,
+        desc="Preprocessing val",
+        cache_path=caches["val"],
     )
-    test_ds = make_dataset(
-        test_samples, vocab,
-        batch_size=cfg.batch_size,
-        max_len=cfg.max_len,
-        target_height=cfg.target_height,
-        max_width=cfg.max_width,
-        scale_factor=cfg.scale_factor,
-        shuffle=False,
+    test_imgs, test_tin, test_tout = preprocess_split(
+        test_samples, vocab, cfg.max_len,
+        cfg.target_height, cfg.max_width, cfg.scale_factor,
+        desc="Preprocessing test",
+        cache_path=caches["test"],
     )
+
+    train_ds = make_dataset_from_arrays(
+        train_imgs, train_tin, train_tout,
+        batch_size=cfg.batch_size, shuffle=True,
+    )
+    val_ds = make_dataset_from_arrays(
+        val_imgs, val_tin, val_tout,
+        batch_size=cfg.batch_size, shuffle=False,
+    )
+    test_ds = make_dataset_from_arrays(
+        test_imgs, test_tin, test_tout,
+        batch_size=cfg.batch_size, shuffle=False,
+    )
+
     return train_ds, val_ds, test_ds
 
 

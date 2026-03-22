@@ -201,3 +201,64 @@ def make_dataset(samples, vocab, batch_size, max_len, target_height=128, max_wid
     ds = ds.batch(batch_size, drop_remainder=False)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
+
+
+def cache_paths(output_dir, prefix="preprocessed"):
+    return {
+        "train": os.path.join(output_dir, f"{prefix}_train.npz"),
+        "val": os.path.join(output_dir, f"{prefix}_val.npz"),
+        "test": os.path.join(output_dir, f"{prefix}_test.npz"),
+    }
+
+
+def save_preprocessed(path, images, tgt_in, tgt_out):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(path, images=images, tgt_in=tgt_in, tgt_out=tgt_out)
+
+
+def load_preprocessed(path):
+    data = np.load(path)
+    return data["images"], data["tgt_in"], data["tgt_out"]
+
+def preprocess_split(samples, vocab, max_len, target_height, max_width, scale_factor,
+                     desc, cache_path=None):
+    # If cache exists, load from disk
+    if cache_path is not None and os.path.exists(cache_path):
+        logger.info(f"Loading preprocessed data from {cache_path}")
+        imgs, tins, touts = load_preprocessed(cache_path)
+        return imgs, tins, touts
+
+    imgs = []
+    tins = []
+    touts = []
+
+    for s in tqdm(samples, desc=desc, leave=True):
+        img = preprocess_image(
+            s["image_path"],
+            target_height=target_height,
+            max_width=max_width,
+            scale_factor=scale_factor,
+        )
+        tgt_in, tgt_out = vocab.encode(s["formula"], max_len=max_len)
+        imgs.append(img)
+        tins.append(tgt_in)
+        touts.append(tgt_out)
+
+    imgs = np.array(imgs, dtype=np.float32)
+    tins = np.array(tins, dtype=np.int32)
+    touts = np.array(touts, dtype=np.int32)
+
+    if cache_path is not None:
+        save_preprocessed(cache_path, imgs, tins, touts)
+
+    return imgs, tins, touts
+
+
+def make_dataset_from_arrays(images, tgt_in, tgt_out,
+                             batch_size, shuffle=False, buffer_size=2048):
+    ds = tf.data.Dataset.from_tensor_slices((images, tgt_in, tgt_out))
+    if shuffle:
+        ds = ds.shuffle(buffer_size)
+    ds = ds.batch(batch_size, drop_remainder=False)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
