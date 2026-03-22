@@ -17,7 +17,7 @@
         # Импортируем rocm-cmake из отдельного файла
         rocm-cmake = import ./rocm-cmake.nix { inherit pkgs; };
         libdivide  = import ./libdivide.nix  { inherit pkgs; };
-        nanobind = import ./nanobind.nix  { inherit pkgs; };
+       # nanobind = import ./nanobind.nix  { inherit pkgs; };
 
         hipsparselt = pkgs.stdenv.mkDerivation rec {
           pname = "hipsparselt";
@@ -30,18 +30,31 @@
             hash  = "sha256-Vdzcj/ZKr8KQC+HMAIhGk1gfx35fD3XHJsT5EYGYMKQ=";
           };
 
+pythonWithPackages = pkgs.python312.withPackages (ps: with ps; [
+  packaging
+pyyaml
+msgpack
+joblib
+simplejson
+ujson
+orjson
+yappi
+  nanobind
+  numpy
+]);
+
           nativeBuildInputs = with pkgs; [
             cmake
             ninja
-            python312
+            pythonWithPackages
             git
             rocm-cmake
 	    yaml-cpp
-  python312Packages.pyyaml
-  python312Packages.joblib
-  python312Packages.numpy
-  python312Packages.msgpack
-  python312Packages.python-dateutil
+#  python312Packages.pyyaml
+#  python312Packages.joblib
+#  python312Packages.numpy
+#  python312Packages.msgpack
+#  python312Packages.python-dateutil
           ];
 
           buildInputs = with pkgs; [
@@ -53,11 +66,13 @@
             rocmPackages.clr
             rocmPackages.roctracer
             rocmPackages.amdsmi
+            rocmPackages.rocm-smi
             #rocmPackages.hipfort
             #haskellPackages.hip
-	    rocmPackages.llvm.llvm
-	    rocmPackages.llvm.lld
-	    rocmPackages.hipcc
+	    #rocmPackages.llvm.llvm
+	    #rocmPackages.llvm.lld
+	    rocmPackages.clang
+	    #rocmPackages.hipcc
             #flang
 	    gfortran
 	    msgpack-cxx
@@ -69,13 +84,13 @@
 	    blas
 	    cli11
 	    # nanobind
-	    python312
+	    pythonWithPackages
 	    python312Packages.nanobind
-  python312Packages.pyyaml
-  python312Packages.joblib
-  python312Packages.numpy
-  python312Packages.msgpack
-  python312Packages.python-dateutil
+#  python312Packages.pyyaml
+#  python312Packages.joblib
+#  python312Packages.numpy
+#  python312Packages.msgpack
+#  python312Packages.python-dateutil
 	    tree
           ];
 
@@ -100,9 +115,18 @@
   "-DHIP_ROOT_DIR=${pkgs.rocmPackages.clr}"
   "-DHIP_PLATFORM=amd"
   "-DHIP_COMPILER=clang"
-  # ROCm settings
-#  "-DAMDGPU_TARGETS=gfx1100;gfx1101;gfx1102;gfx1103"  # For RDNA3 (8845HS)
-    "-DAMDGPU_TARGETS=gfx1103"  # Only your GPU
+
+  "-DAMDGPU_TARGETS=gfx1103"
+  "-DGPU_TARGETS=gfx1103"
+  "-DCMAKE_HIP_ARCHITECTURES=gfx1103"
+  "-DHIP_AMDGPU_TARGET=gfx1103"
+  "-DROCM_ARCH=gfx1103"
+  "-DTENSILE_GPU_ARCHS=gfx1103"
+  "-DCMAKE_CXX_FLAGS=--offload-arch=gfx1103"
+  "-DCMAKE_HIP_FLAGS=--offload-arch=gfx1103"
+
+  "-DCMAKE_Fortran_COMPILER=${pkgs.gfortran}/bin/gfortran"
+  "-DCMAKE_Fortran_FLAGS=-fallow-argument-mismatch"
           ];
 
           # На первом шаге можно попробовать без патчинга FetchContent и посмотреть,
@@ -201,15 +225,29 @@ postPatch = ''
   export HIP_COMPILER=clang
 
     # Ensure Python can find required modules
-  export PYTHONPATH="${pkgs.python312Packages.pyyaml}/lib/python3.12/site-packages:${pkgs.python312Packages.joblib}/lib/python3.12/site-packages:${pkgs.python312Packages.numpy}/lib/python3.12/site-packages:${pkgs.python312Packages.msgpack}/lib/python3.12/site-packages:$PYTHONPATH"
+#  export PYTHONPATH="${pkgs.python312Packages.pyyaml}/lib/python3.12/site-packages:${pkgs.python312Packages.joblib}/lib/python3.12/site-packages:${pkgs.python312Packages.numpy}/lib/python3.12/site-packages:${pkgs.python312Packages.msgpack}/lib/python3.12/site-packages:$PYTHONPATH"
   
   # Also set for Tensile scripts
   export TENSILE_USE_SYSTEM_PYTHON=1
+
+    export AMDGPU_TARGETS=gfx1103
+  export GPU_TARGETS=gfx1103
+  export CMAKE_HIP_ARCHITECTURES=gfx1103
+  export HIP_AMDGPU_TARGET=gfx1103
+  export ROCM_ARCH=gfx1103
+  export HCC_AMDGPU_TARGET=gfx1103
+  export TENSILE_GPU_ARCHS=gfx1103
+  export HIPCC_ARCH_FLAGS="--offload-arch=gfx1103"
+  
+  # Also set compiler flags
+  export CXXFLAGS="--offload-arch=gfx1103"
+  export CFLAGS="--offload-arch=gfx1103"
+  export HIPCC_FLAGS="--offload-arch=gfx1103"
   
   echo "=== Python packages check ==="
   python -c "import yaml; print('yaml OK')"
   python -c "import joblib; print('joblib OK')"
-  python -c "import numpy; print('numpy OK')"
+#  python -c "import numpy; print('numpy OK')"
   echo "============================"
 
 	    pwd
@@ -219,7 +257,12 @@ postPatch = ''
             mkdir -p build/release
             cd build/release
             cmake ../.. \
-              -DCMAKE_INSTALL_PREFIX=$out
+              -DCMAKE_INSTALL_PREFIX=$out \
+    -DAMDGPU_TARGETS=gfx1103 \
+    -DGPU_TARGETS=gfx1103 \
+    -DCMAKE_HIP_ARCHITECTURES=gfx1103 \
+    -DCMAKE_CXX_FLAGS="--offload-arch=gfx1103" \
+    -DCMAKE_HIP_FLAGS="--offload-arch=gfx1103"
             make -j"$(nproc)"
           '';
 
