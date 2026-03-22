@@ -1,8 +1,10 @@
+tensorflow[and-cuda]
 keras>=3.0.0
-tensorflow>=2.16.0
 numpy
 opencv-python
 matplotlib
 loguru
 tqdm
+pexpect
+ipykernel
 

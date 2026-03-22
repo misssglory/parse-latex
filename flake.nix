@@ -349,8 +349,10 @@ postPatch = ''
               "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/tensorflow_rocm-2.20.0.dev0%2Bselfbuilt-cp312-cp312-manylinux_2_28_x86_64.whl" \
               "numpy" \
               "matplotlib" \
-              "loguru"
-              "tqdm"
+              "loguru" \
+              "tqdm" \
+              "pexpect" \
+              "ipykernel" 
 
             export LD_LIBRARY_PATH="${ldLibPath}"
             if [ -n "$ORIGINAL_LD_LIBRARY_PATH" ]; then
