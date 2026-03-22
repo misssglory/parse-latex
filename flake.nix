@@ -350,6 +350,7 @@ postPatch = ''
               "numpy" \
               "matplotlib" \
               "loguru"
+              "tqdm"
 
             export LD_LIBRARY_PATH="${ldLibPath}"
             if [ -n "$ORIGINAL_LD_LIBRARY_PATH" ]; then
