@@ -211,7 +211,7 @@ def cache_paths(output_dir, prefix="preprocessed"):
     }
 
 
-def save_preprocessed(path, images, tgt_in, tgt_out):
+def save_preprocesse1d(path, images, tgt_in, tgt_out):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(path, images=images, tgt_in=tgt_in, tgt_out=tgt_out)
 
@@ -222,10 +222,13 @@ def load_preprocessed(path):
 
 def preprocess_split(samples, vocab, max_len, target_height, max_width, scale_factor,
                      desc, cache_path=None):
-    # If cache exists, load from disk
+    # If cache exists, load and return lists
     if cache_path is not None and os.path.exists(cache_path):
         logger.info(f"Loading preprocessed data from {cache_path}")
-        imgs, tins, touts = load_preprocessed(cache_path)
+        data = np.load(cache_path, allow_pickle=True)
+        imgs = list(data["images"])
+        tins = list(data["tgt_in"])
+        touts = list(data["tgt_out"])
         return imgs, tins, touts
 
     imgs = []
@@ -238,18 +241,22 @@ def preprocess_split(samples, vocab, max_len, target_height, max_width, scale_fa
             target_height=target_height,
             max_width=max_width,
             scale_factor=scale_factor,
-        )
+        )  # shape [H, W, 1], W varies
         tgt_in, tgt_out = vocab.encode(s["formula"], max_len=max_len)
         imgs.append(img)
         tins.append(tgt_in)
         touts.append(tgt_out)
 
-    imgs = np.array(imgs, dtype=np.float32)
-    tins = np.array(tins, dtype=np.int32)
-    touts = np.array(touts, dtype=np.int32)
-
     if cache_path is not None:
-        save_preprocessed(cache_path, imgs, tins, touts)
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        # store as object arrays so variable W survives
+        np.savez_compressed(
+            cache_path,
+            images=np.array(imgs, dtype=object),
+            tgt_in=np.array(tins, dtype=np.int32),
+            tgt_out=np.array(touts, dtype=np.int32),
+        )
+        logger.info(f"Saved preprocessed data to {cache_path}")
 
     return imgs, tins, touts
 
@@ -260,5 +267,43 @@ def make_dataset_from_arrays(images, tgt_in, tgt_out,
     if shuffle:
         ds = ds.shuffle(buffer_size)
     ds = ds.batch(batch_size, drop_remainder=False)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
+
+def make_dataset_from_lists(images, tgt_in, tgt_out,
+                            batch_size, shuffle=False, buffer_size=2048):
+    # images: list of [H, W_i, 1]
+    # tgt_in/out: list or array of [T]
+    def gen():
+        for img, ti, to in zip(images, tgt_in, tgt_out):
+            yield img, ti, to
+
+    sample_img = images[0]
+    H = sample_img.shape[0]
+
+    output_signature = (
+        tf.TensorSpec(shape=(H, None, 1), dtype=tf.float32),
+        tf.TensorSpec(shape=(tgt_in[0].shape[0],), dtype=tf.int32),
+        tf.TensorSpec(shape=(tgt_out[0].shape[0],), dtype=tf.int32),
+    )
+
+    ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
+
+    if shuffle:
+        ds = ds.shuffle(buffer_size)
+
+    ds = ds.padded_batch(
+        batch_size,
+        padded_shapes=(
+            [H, None, 1],
+            [tgt_in[0].shape[0]],
+            [tgt_out[0].shape[0]],
+        ),
+        padding_values=(
+            tf.constant(1.0, dtype=tf.float32),
+            tf.constant(0, dtype=tf.int32),
+            tf.constant(0, dtype=tf.int32),
+        ),
+    )
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
