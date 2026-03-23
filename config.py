@@ -27,18 +27,21 @@ class TrainConfig:
     dec_dim: int = 256
     attn_dim: int = 256
 
-    visualize_every: int = 1
-    num_visual_samples: int = 3
+    visualize_every: int = 5
+    num_visual_samples: int = 5
 
-    precision: str = "fp32"   # "fp32" or "fp16"
+    precision: str = "fp32"
     run_eagerly: bool = False
 
     log_file: str = "train.log"
     history_file: str = "history.json"
 
-    use_bos_eos: bool = True  # currently always True for compatibility
-    cache_preprocessed: bool = False
-    cache_prefix: str = "preprocessed"  # base name for .npz files
+    use_bos_eos: bool = True
+
+    cache_preprocessed: bool = True
+    shard_size: int = 512
+    num_preprocess_workers: int = 4
+    preprocessed_dirname: str = "preprocessed"
 
     def save_json(self, path: str):
         path = Path(path)

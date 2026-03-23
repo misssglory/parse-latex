@@ -7,9 +7,8 @@ from loguru import logger
 from config import TrainConfig
 from utils import setup_logging, set_seed, setup_precision
 from data import (
-    load_formulas, load_split, Vocab,
-    preprocess_image, preprocess_split,
-    cache_paths, make_dataset_from_arrays,
+    load_formulas, load_split, Vocab, preprocess_image,
+    build_preprocessed_split, make_dataset_from_manifest
 )
 from model import Im2LatexModel
 from metrics import char_diff, compile_latex_formula
@@ -20,8 +19,7 @@ from history_utils import load_history, save_history, append_epoch, plot_history
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--resume-from", type=str, default=None,
-                        help="Path to previous output_dir to resume from")
+    parser.add_argument("--resume-from", type=str, default=None)
 
     parser.add_argument("--dataset-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
@@ -48,8 +46,10 @@ def parse_args():
 
     parser.add_argument("--precision", type=str, choices=["fp32", "fp16"], default=None)
     parser.add_argument("--run-eagerly", action="store_true")
-    parser.add_argument("--cache-preprocessed", action="store_true",
-                    help="Cache preprocessed splits into output_dir and reuse on resume")
+
+    parser.add_argument("--cache-preprocessed", action="store_true")
+    parser.add_argument("--shard-size", type=int, default=None)
+    parser.add_argument("--num-preprocess-workers", type=int, default=None)
 
     args = parser.parse_args()
 
@@ -69,6 +69,10 @@ def parse_args():
         if key == "run_eagerly":
             if value:
                 cfg.run_eagerly = True
+            continue
+        if key == "cache_preprocessed":
+            if value:
+                cfg.cache_preprocessed = True
             continue
         if value is not None:
             setattr(cfg, key.replace("-", "_"), value)
@@ -96,44 +100,68 @@ def build_splits(cfg):
     return train_samples, val_samples, test_samples
 
 
+def build_or_load_manifests(cfg, vocab, train_samples, val_samples, test_samples):
+    train_manifest = build_preprocessed_split(
+        train_samples, vocab, "train", cfg.output_dir,
+        cfg.max_len, cfg.target_height, cfg.max_width, cfg.scale_factor,
+        shard_size=cfg.shard_size,
+        num_workers=cfg.num_preprocess_workers,
+        dirname=cfg.preprocessed_dirname,
+    )
+    val_manifest = build_preprocessed_split(
+        val_samples, vocab, "val", cfg.output_dir,
+        cfg.max_len, cfg.target_height, cfg.max_width, cfg.scale_factor,
+        shard_size=cfg.shard_size,
+        num_workers=cfg.num_preprocess_workers,
+        dirname=cfg.preprocessed_dirname,
+    )
+    test_manifest = build_preprocessed_split(
+        test_samples, vocab, "test", cfg.output_dir,
+        cfg.max_len, cfg.target_height, cfg.max_width, cfg.scale_factor,
+        shard_size=cfg.shard_size,
+        num_workers=cfg.num_preprocess_workers,
+        dirname=cfg.preprocessed_dirname,
+    )
+    return train_manifest, val_manifest, test_manifest
+
+
 def make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples):
-    caches = cache_paths(cfg.output_dir, prefix=cfg.cache_prefix) if cfg.cache_preprocessed else {
-        "train": None, "val": None, "test": None
-    }
-
-    train_imgs, train_tin, train_tout = preprocess_split(
-        train_samples, vocab, cfg.max_len,
-        cfg.target_height, cfg.max_width, cfg.scale_factor,
-        desc="Preprocessing train",
-        cache_path=caches["train"],
-    )
-    val_imgs, val_tin, val_tout = preprocess_split(
-        val_samples, vocab, cfg.max_len,
-        cfg.target_height, cfg.max_width, cfg.scale_factor,
-        desc="Preprocessing val",
-        cache_path=caches["val"],
-    )
-    test_imgs, test_tin, test_tout = preprocess_split(
-        test_samples, vocab, cfg.max_len,
-        cfg.target_height, cfg.max_width, cfg.scale_factor,
-        desc="Preprocessing test",
-        cache_path=caches["test"],
+    train_manifest, val_manifest, test_manifest = build_or_load_manifests(
+        cfg, vocab, train_samples, val_samples, test_samples
     )
 
-    train_ds = make_dataset_from_arrays(
-        train_imgs, train_tin, train_tout,
-        batch_size=cfg.batch_size, shuffle=True,
+    train_ds = make_dataset_from_manifest(
+        train_manifest, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed
     )
-    val_ds = make_dataset_from_arrays(
-        val_imgs, val_tin, val_tout,
-        batch_size=cfg.batch_size, shuffle=False,
+    val_ds = make_dataset_from_manifest(
+        val_manifest, batch_size=cfg.batch_size, shuffle=False, seed=cfg.seed
     )
-    test_ds = make_dataset_from_arrays(
-        test_imgs, test_tin, test_tout,
-        batch_size=cfg.batch_size, shuffle=False,
+    test_ds = make_dataset_from_manifest(
+        test_manifest, batch_size=cfg.batch_size, shuffle=False, seed=cfg.seed
     )
-
     return train_ds, val_ds, test_ds
+
+
+def prepare_model(cfg, vocab):
+    model = Im2LatexModel(
+        vocab_size=len(vocab.token_to_id),
+        d_model=cfg.d_model,
+        emb_dim=cfg.emb_dim,
+        dec_dim=cfg.dec_dim,
+        attn_dim=cfg.attn_dim,
+        bos_id=vocab.bos_id,
+        eos_id=vocab.eos_id,
+        pad_id=vocab.pad_id,
+        name="im2_latex_model",
+    )
+
+    dummy_images = tf.zeros([1, cfg.target_height, 128, 1], dtype=tf.float32)
+    dummy_tgt = tf.zeros([1, cfg.max_len - 1], dtype=tf.int32)
+    _ = model((dummy_images, dummy_tgt), training=False)
+
+    optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.lr)
+    model.compile(optimizer=optimizer, run_eagerly=cfg.run_eagerly)
+    return model
 
 
 def prepare_new_training(cfg):
@@ -147,25 +175,7 @@ def prepare_new_training(cfg):
     cfg.save_json(os.path.join(cfg.output_dir, "resolved_config.json"))
 
     train_ds, val_ds, test_ds = make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples)
-
-    model = Im2LatexModel(
-        vocab_size=len(vocab.token_to_id),
-        d_model=cfg.d_model,
-        emb_dim=cfg.emb_dim,
-        dec_dim=cfg.dec_dim,
-        attn_dim=cfg.attn_dim,
-        bos_id=vocab.bos_id,
-        eos_id=vocab.eos_id,
-        pad_id=vocab.pad_id,
-        name="im2_latex_model",
-    )
-
-    dummy_images = tf.zeros([1, cfg.target_height, 128, 1], dtype=tf.float32)
-    dummy_tgt = tf.zeros([1, cfg.max_len - 1], dtype=tf.int32)
-    _ = model((dummy_images, dummy_tgt), training=False)
-
-    optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.lr)
-    model.compile(optimizer=optimizer, run_eagerly=cfg.run_eagerly)
+    model = prepare_model(cfg, vocab)
 
     history_path = os.path.join(cfg.output_dir, cfg.history_file)
     history = load_history(history_path)
@@ -175,29 +185,10 @@ def prepare_new_training(cfg):
 
 def prepare_resume(cfg):
     train_samples, val_samples, test_samples = build_splits(cfg)
-
     vocab = Vocab.load(os.path.join(cfg.output_dir, "vocab.json"))
 
     train_ds, val_ds, test_ds = make_datasets_for(cfg, vocab, train_samples, val_samples, test_samples)
-
-    model = Im2LatexModel(
-        vocab_size=len(vocab.token_to_id),
-        d_model=cfg.d_model,
-        emb_dim=cfg.emb_dim,
-        dec_dim=cfg.dec_dim,
-        attn_dim=cfg.attn_dim,
-        bos_id=vocab.bos_id,
-        eos_id=vocab.eos_id,
-        pad_id=vocab.pad_id,
-        name="im2_latex_model",
-    )
-
-    dummy_images = tf.zeros([1, cfg.target_height, 128, 1], dtype=tf.float32)
-    dummy_tgt = tf.zeros([1, cfg.max_len - 1], dtype=tf.int32)
-    _ = model((dummy_images, dummy_tgt), training=False)
-
-    optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.lr)
-    model.compile(optimizer=optimizer, run_eagerly=cfg.run_eagerly)
+    model = prepare_model(cfg, vocab)
 
     best_ckpt = os.path.join(cfg.output_dir, "checkpoints", "best.weights.h5")
     model.load_weights(best_ckpt)
@@ -233,7 +224,6 @@ def sample_visualization(model, vocab, samples, cfg, epoch):
 
         compiles, _ = compile_latex_formula(pred_formula)
         diff = char_diff(gt_formula, pred_formula)
-
         blended = overlay_attention(img, avg_attn)
 
         rows.append({
@@ -249,10 +239,7 @@ def sample_visualization(model, vocab, samples, cfg, epoch):
     logger.info(f"saved sample visualization: {out_path}")
 
 
-def train_model(cfg, model, vocab,
-                train_samples, val_samples,
-                train_ds, val_ds,
-                history):
+def train_model(cfg, model, vocab, train_samples, val_samples, train_ds, val_ds, history):
     os.makedirs(os.path.join(cfg.output_dir, "samples"), exist_ok=True)
     os.makedirs(os.path.join(cfg.output_dir, "checkpoints"), exist_ok=True)
 
@@ -323,8 +310,5 @@ if __name__ == "__main__":
         model, vocab, train_samples, val_samples, test_samples, train_ds, val_ds, test_ds, history = \
             prepare_new_training(cfg)
 
-    model, history = train_model(cfg, model, vocab,
-                                 train_samples, val_samples,
-                                 train_ds, val_ds, history)
-
+    model, history = train_model(cfg, model, vocab, train_samples, val_samples, train_ds, val_ds, history)
     evaluate_model(model, vocab, test_samples, test_ds, cfg)
