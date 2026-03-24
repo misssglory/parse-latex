@@ -191,8 +191,11 @@ def prepare_resume(cfg):
     model = prepare_model(cfg, vocab)
 
     best_ckpt = os.path.join(cfg.output_dir, "checkpoints", "best.weights.h5")
-    model.load_weights(best_ckpt)
-    logger.info(f"Resuming from checkpoint: {best_ckpt}")
+    if os.path.exists(best_ckpt):
+        model.load_weights(best_ckpt)
+        logger.info(f"Resuming from checkpoint: {best_ckpt}")
+    else:
+        logger.warning("Checkpoint not found. Training from scratch")
 
     history_path = os.path.join(cfg.output_dir, cfg.history_file)
     history = load_history(history_path)
