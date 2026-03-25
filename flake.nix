@@ -98,10 +98,11 @@
             openssl
             libGL
             libGLU
-            xorg.libX11
-            xorg.libXext
-            xorg.libXrender
-            xorg.libXrandr
+            libxcb
+            # xorg.libX11
+            # xorg.libXext
+            # xorg.libXrender
+            # xorg.libX11
             # Additional dependencies for OpenCV
             gst_all_1.gstreamer
             gst_all_1.gst-plugins-base
@@ -210,9 +211,11 @@ EOF
             
             # Create .env file with library paths
             cat > .env << EOF
-LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zeromq}/lib:${pkgs.libsodium}/lib:$LD_LIBRARY_PATH
+LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zeromq}/lib:${pkgs.libsodium}/lib:${pkgs.libxcb}/lib:$LD_LIBRARY_PATH
+
 PYTHONPATH=${pkgs.opencv4}/lib/python3.13/site-packages
 EOF
+           export LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zeromq}/lib:${pkgs.libsodium}/lib:${pkgs.libffi}/lib:${pkgs.openssl}/lib:${pkgs.opencv4}/lib:${pkgs.libGL}/lib:$LD_LIBRARY_PATH
             
             echo ""
             echo "╔════════════════════════════════════════════════════════════════╗"
